@@ -219,12 +219,14 @@ class NearestNeighborMatcher:
 
         X = propensity_scores.reshape(-1, 1)
 
-        self.fit(X, treated)
+        original_standardize = self.standardize
+        self.standardize = False
 
-        if caliper is not None and self.scaler_ is not None:
-            pass
-
-        treated_idx, control_idx, distances = self.transform()
+        try:
+            self.fit(X, treated)
+            treated_idx, control_idx, distances = self.transform()
+        finally:
+            self.standardize = original_standardize
 
         if caliper is not None:
             mask = distances[:, 0] <= caliper
