@@ -22,18 +22,21 @@ class NearestNeighborMatcher:
         metric: str = "euclidean",
         with_replacement: bool = False,
         standardize: bool = True,
+        caliper: Optional[float] = None,
         random_state: Optional[int] = None,
     ):
         self.n_neighbors = n_neighbors
         self.metric = metric
         self.with_replacement = with_replacement
         self.standardize = standardize
+        self.caliper = caliper
         self.random_state = random_state
         self.scaler_ = None
         self.treated_indices_ = None
         self.control_indices_ = None
         self.matches_ = None
         self.distances_ = None
+        self._valid_mask = None
 
     def fit(
         self,
@@ -79,9 +82,27 @@ class NearestNeighborMatcher:
             matched_control_indices = self._match_without_replacement()
             distances = self.distances_
 
-        self.matches_ = matched_control_indices
+        if self.caliper is not None:
+            if self.n_neighbors == 1:
+                valid_mask = distances[:, 0] <= self.caliper
+            else:
+                valid_mask = np.all(distances <= self.caliper, axis=1)
 
-        return self.treated_indices_, matched_control_indices, distances
+            self._valid_mask = valid_mask
+            filtered_treated = self.treated_indices_[valid_mask]
+            filtered_control = matched_control_indices[valid_mask]
+            filtered_distances = distances[valid_mask]
+        else:
+            self._valid_mask = np.ones(len(self.treated_indices_), dtype=bool)
+            filtered_treated = self.treated_indices_
+            filtered_control = matched_control_indices
+            filtered_distances = distances
+
+        self.matches_ = filtered_control
+        self.treated_indices_matched_ = filtered_treated
+        self.distances_matched_ = filtered_distances
+
+        return filtered_treated, filtered_control, filtered_distances
 
     def _match_without_replacement(self) -> np.ndarray:
         n_treated = len(self.treated_indices_)
@@ -184,19 +205,26 @@ class NearestNeighborMatcher:
         if self.matches_ is None:
             raise ValueError("No matches found. Call fit_transform() first.")
 
-        treated_df = df.iloc[self.treated_indices_].copy()
-        treated_df["match_id"] = np.arange(len(self.treated_indices_))
+        treated_indices = self.treated_indices_matched_
+        n_matched = len(treated_indices)
+
+        treated_df = df.iloc[treated_indices].copy()
+        treated_df["match_id"] = np.arange(n_matched)
         treated_df["group"] = "treated"
-        treated_df["match_distance"] = self.distances_[:, 0] if self.n_neighbors == 1 else None
+
+        if self.n_neighbors == 1:
+            treated_df["match_distance"] = self.distances_matched_[:, 0]
+        else:
+            treated_df["match_distance"] = None
 
         control_rows = []
-        for i in range(len(self.treated_indices_)):
+        for i in range(n_matched):
             for j in range(self.n_neighbors):
                 control_idx = self.matches_[i, j]
                 row = df.iloc[control_idx].copy()
                 row["match_id"] = i
                 row["group"] = "control"
-                row["match_distance"] = self.distances_[i, j]
+                row["match_distance"] = self.distances_matched_[i, j]
                 control_rows.append(row)
 
         control_df = pd.DataFrame(control_rows)
@@ -220,18 +248,17 @@ class NearestNeighborMatcher:
         X = propensity_scores.reshape(-1, 1)
 
         original_standardize = self.standardize
+        original_caliper = self.caliper
+
         self.standardize = False
+        if caliper is not None:
+            self.caliper = caliper
 
         try:
             self.fit(X, treated)
             treated_idx, control_idx, distances = self.transform()
         finally:
             self.standardize = original_standardize
-
-        if caliper is not None:
-            mask = distances[:, 0] <= caliper
-            treated_idx = treated_idx[mask]
-            control_idx = control_idx[mask]
-            distances = distances[mask]
+            self.caliper = original_caliper
 
         return treated_idx, control_idx, distances
